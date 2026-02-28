@@ -1,0 +1,10 @@
+build/
+cmake-build-*/
+.cache/
+*.obj
+*.exe
+*.dll
+*.lib
+*.pdb
+*.ilk
+*.exp

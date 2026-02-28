@@ -1,0 +1,51 @@
+#include <gtest/gtest.h>
+#include "graphos/core/constants.hpp"
+
+using namespace graphos;
+
+TEST(Constants, TensorDimensions) {
+    EXPECT_EQ(TENSOR_DIM, 64);
+    EXPECT_EQ(NUM_CLASSES, 3);
+    EXPECT_EQ(NUM_ROUTES, 4);
+    EXPECT_EQ(DEFAULT_BATCH_SIZE, 64);
+    EXPECT_EQ(HIDDEN_DIM, 32);
+    EXPECT_EQ(COMPOSED_INPUT_DIM, 67);
+}
+
+TEST(Constants, ClassIDs) {
+    EXPECT_EQ(CLASS_HTTP, 0);
+    EXPECT_EQ(CLASS_DNS, 1);
+    EXPECT_EQ(CLASS_OTHER, 2);
+    EXPECT_EQ(CLASS_NAMES.size(), 3u);
+    EXPECT_EQ(CLASS_NAMES.at(CLASS_HTTP), "TCP_HTTP");
+    EXPECT_EQ(CLASS_NAMES.at(CLASS_DNS), "UDP_DNS");
+    EXPECT_EQ(CLASS_NAMES.at(CLASS_OTHER), "OTHER");
+}
+
+TEST(Constants, RouteIDs) {
+    EXPECT_EQ(ROUTE_LOCAL, 0);
+    EXPECT_EQ(ROUTE_FORWARD, 1);
+    EXPECT_EQ(ROUTE_DROP, 2);
+    EXPECT_EQ(ROUTE_MONITOR, 3);
+    EXPECT_EQ(ROUTE_NAMES.size(), 4u);
+}
+
+TEST(Constants, Offsets) {
+    EXPECT_EQ(OFFSET_PROTOCOL, 23);
+    EXPECT_EQ(OFFSET_SRC_PORT, 34);
+    EXPECT_EQ(OFFSET_DST_PORT, 36);
+    EXPECT_EQ(OFFSET_SRC_IP, 26);
+    EXPECT_EQ(OFFSET_DST_IP, 30);
+    EXPECT_EQ(OFFSET_PAYLOAD, 54);
+}
+
+TEST(Constants, Protocols) {
+    EXPECT_EQ(PROTO_TCP, 6);
+    EXPECT_EQ(PROTO_UDP, 17);
+    EXPECT_EQ(PROTO_ICMP, 1);
+    EXPECT_TRUE(HTTP_PORTS.count(80));
+    EXPECT_TRUE(HTTP_PORTS.count(443));
+    EXPECT_TRUE(HTTP_PORTS.count(8080));
+    EXPECT_TRUE(HTTP_PORTS.count(8443));
+    EXPECT_EQ(DNS_PORT, 53);
+}
