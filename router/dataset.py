@@ -140,3 +140,98 @@ class PacketDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.data[idx], self.labels[idx]
+
+
+def label_raw_packet(raw_bytes):
+    """Assign a ground truth label from raw packet bytes using header inspection."""
+    if len(raw_bytes) < 38:
+        return CLASS_OTHER
+    protocol = raw_bytes[23]
+    dst_port = (raw_bytes[36] << 8) | raw_bytes[37]
+    src_port = (raw_bytes[34] << 8) | raw_bytes[35]
+    if protocol == PROTO_TCP and (dst_port in HTTP_PORTS or src_port in HTTP_PORTS):
+        return CLASS_HTTP
+    if protocol == PROTO_UDP and (dst_port == DNS_PORT or src_port == DNS_PORT):
+        return CLASS_DNS
+    return CLASS_OTHER
+
+
+class HybridDataset(Dataset):
+    """Hybrid dataset: synthetic packets + real captured packets from pcap files."""
+
+    def __init__(self, pcap_files, samples_per_class=50000,
+                 real_oversample=1, seed=42):
+        """
+        Args:
+            pcap_files: List of .pcap file paths with real traffic.
+            samples_per_class: Number of synthetic packets per class.
+            real_oversample: How many times to repeat real packets
+                (to balance against synthetic majority).
+            seed: Random seed for reproducibility.
+        """
+        random.seed(seed)
+        np.random.seed(seed)
+
+        # 1. Generate synthetic data
+        generators = [
+            (generate_http_packet, CLASS_HTTP),
+            (generate_dns_packet, CLASS_DNS),
+            (generate_other_packet, CLASS_OTHER),
+        ]
+
+        tensors = []
+        labels = []
+        for gen_fn, label in generators:
+            for _ in range(samples_per_class):
+                raw = gen_fn()
+                t = packet_to_tensor(raw)
+                tensors.append(t)
+                labels.append(label)
+
+        syn_count = len(labels)
+
+        # 2. Load real packets from pcap files
+        from scapy.all import rdpcap
+
+        real_tensors = []
+        real_labels = []
+        class_counts = {CLASS_HTTP: 0, CLASS_DNS: 0, CLASS_OTHER: 0}
+
+        for pcap_file in pcap_files:
+            packets = rdpcap(pcap_file)
+            for pkt in packets:
+                raw = bytes(pkt)
+                if len(raw) < 34:
+                    continue
+                label = label_raw_packet(raw)
+                t = packet_to_tensor(raw)
+                real_tensors.append(t)
+                real_labels.append(label)
+                class_counts[label] += 1
+
+        real_count = len(real_labels)
+
+        # 3. Oversample real data
+        for _ in range(real_oversample):
+            tensors.extend(real_tensors)
+            labels.extend(real_labels)
+
+        total = len(labels)
+        print(f"HybridDataset: {syn_count} synthetic + "
+              f"{real_count}x{real_oversample} real = {total} total")
+        print(f"  Real breakdown: HTTP={class_counts[CLASS_HTTP]}, "
+              f"DNS={class_counts[CLASS_DNS]}, OTHER={class_counts[CLASS_OTHER]}")
+
+        self.data = torch.from_numpy(np.concatenate(tensors, axis=0))
+        self.labels = torch.tensor(labels, dtype=torch.long)
+
+        # Shuffle
+        perm = torch.randperm(len(self.labels))
+        self.data = self.data[perm]
+        self.labels = self.labels[perm]
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        return self.data[idx], self.labels[idx]

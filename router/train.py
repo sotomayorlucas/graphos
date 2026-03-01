@@ -1,5 +1,7 @@
 """Training script for the RouterGraph packet classifier."""
 
+import argparse
+import glob
 import os
 import sys
 
@@ -9,7 +11,7 @@ from torch.utils.data import DataLoader, random_split
 
 from core.constants import CLASS_NAMES
 from router.model import RouterGraph
-from router.dataset import PacketDataset
+from router.dataset import PacketDataset, HybridDataset
 
 
 def train(
@@ -19,11 +21,22 @@ def train(
     lr=1e-3,
     val_split=0.1,
     save_path="models/router_graph.pth",
+    pcap_files=None,
+    real_oversample=5,
 ):
     device = torch.device("cpu")  # Training on CPU is fine for this tiny model
 
-    print("Generating synthetic dataset...")
-    dataset = PacketDataset(samples_per_class=samples_per_class)
+    if pcap_files:
+        print(f"Building hybrid dataset with {len(pcap_files)} pcap file(s)...")
+        dataset = HybridDataset(
+            pcap_files=pcap_files,
+            samples_per_class=samples_per_class,
+            real_oversample=real_oversample,
+        )
+    else:
+        print("Generating synthetic dataset...")
+        dataset = PacketDataset(samples_per_class=samples_per_class)
+
     total = len(dataset)
     val_size = int(total * val_split)
     train_size = total - val_size
@@ -93,4 +106,24 @@ def train(
 
 
 if __name__ == "__main__":
-    train()
+    parser = argparse.ArgumentParser(description="Train RouterGraph classifier")
+    parser.add_argument("--pcap", nargs="+", help="Real pcap files for hybrid training")
+    parser.add_argument("--pcap-dir", help="Directory of .pcap files")
+    parser.add_argument("--oversample", type=int, default=5,
+                        help="Oversample factor for real data (default: 5)")
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--samples-per-class", type=int, default=50000)
+    args = parser.parse_args()
+
+    pcap_files = []
+    if args.pcap:
+        pcap_files.extend(args.pcap)
+    if args.pcap_dir:
+        pcap_files.extend(glob.glob(os.path.join(args.pcap_dir, "*.pcap")))
+
+    train(
+        pcap_files=pcap_files or None,
+        real_oversample=args.oversample,
+        epochs=args.epochs,
+        samples_per_class=args.samples_per_class,
+    )
