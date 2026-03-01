@@ -883,7 +883,7 @@ The KernelRuntime manages multiple compiled ONNX programs behind a shared \textt
 
 \subsection{Classification Accuracy}
 
-The MLP classifier ($3{,}235$ parameters) was trained on $135{,}000$ synthetic packets (20~epochs, Adam, $\eta = 10^{-3}$) and achieves $99.03\%$ validation accuracy on a held-out set of $15{,}000$ packets. NPU and CPU inference agree on $99.26\%$ of $10{,}000$ test packets.
+The MLP classifier ($3{,}235$ parameters) was initially trained on $135{,}000$ synthetic packets (20~epochs, Adam, $\eta = 10^{-3}$), achieving $99.03\%$ validation accuracy on a held-out set of $15{,}000$ packets. After hybrid retraining with real captured traffic (Section~\ref{sec:retrain}), the model achieves $\mathbf{99.71\%}$ validation accuracy on $18{,}500$ held-out samples drawn from both synthetic and real distributions. NPU and CPU inference agree on $99.26\%$ of $10{,}000$ synthetic test packets.
 
 \subsection{Latency and Batch Amortization}
 
@@ -1501,9 +1501,9 @@ Overall     & 10{,}000 & 63{,}029  & 158{,}840 & 68{,}643 \\
 \label{tab:live-latency}
 \end{table}
 
-\subsection{Ground Truth Validation}
+\subsection{Ground Truth Validation (Synthetic-Only Model)}
 
-To validate classification correctness on real traffic, we construct a \emph{ground truth classifier} from raw packet bytes: TCP with destination/source port $\in \{80, 443, 8080, 8443\}$ $\to$ \textsc{TCP\_HTTP}; UDP with port 53 $\to$ \textsc{UDP\_DNS}; all else $\to$ \textsc{OTHER}. We compare this with NPU predictions on 500 captured packets.
+To validate classification correctness on real traffic, we construct a \emph{ground truth classifier} from raw packet bytes: TCP with destination/source port $\in \{80, 443, 8080, 8443\}$ $\to$ \textsc{TCP\_HTTP}; UDP with port 53 $\to$ \textsc{UDP\_DNS}; all else $\to$ \textsc{OTHER}. We compare this with NPU predictions on 500 captured packets. Table~\ref{tab:confusion-before} shows the confusion matrix for the initial synthetic-only model.
 
 \begin{table}[H]
 \centering
@@ -1517,31 +1517,81 @@ UDP\_DNS  & 0   & \textbf{0}   & 0   \\
 OTHER     & 2   & 0   & \textbf{17}  \\
 \bottomrule
 \end{tabular}
-\caption{Confusion matrix: ground truth (row) vs.\ NPU prediction (column) on 500 live packets. The model achieves 99.1\% HTTP precision but 46.2\% HTTP recall.}
-\label{tab:confusion}
+\caption{Confusion matrix \emph{before} retraining (synthetic-only model) on 500 live packets. Agreement: 47.8\%. HTTP precision: 99.1\%, but HTTP recall only 46.2\%.}
+\label{tab:confusion-before}
 \end{table}
 
-\noindent Key metrics:
-\begin{itemize}[leftmargin=*]
-  \item \textbf{HTTP Precision}: $222 / (222 + 2) = 99.1\%$ --- when the NPU predicts TCP\_HTTP, it is correct.
-  \item \textbf{HTTP Recall}: $222 / (222 + 0 + 259) = 46.2\%$ --- the model conservatively classifies many HTTPS packets as OTHER.
-  \item \textbf{Determinism}: 100\% --- identical inputs always produce identical outputs (verified over two consecutive runs).
-  \item \textbf{Validity}: 100\% --- every class ID $\in \{0, 1, 2\}$, no out-of-range predictions.
-\end{itemize}
+\noindent The synthetic-only model achieves high precision (99.1\%) but low recall (46.2\%): it conservatively classifies 259 real HTTPS packets as \textsc{OTHER} because their TLS-encrypted payloads (bytes 54--63) resemble the random noise distribution of the \textsc{OTHER} training class.
 
-\subsection{Analysis: The Synthetic--Real Domain Gap}
+\subsection{The Synthetic--Real Domain Gap}
 
 The recall gap is explained by the \emph{domain shift} between synthetic training data and real traffic:
 
 \begin{enumerate}[leftmargin=*]
-  \item \textbf{Encrypted payloads}: The MLP observes all 64 input bytes. Real HTTPS traffic has TLS-encrypted payloads (bytes 54--63) that are indistinguishable from random noise, matching the distribution of the \textsc{OTHER} class in synthetic training data.
+  \item \textbf{Encrypted payloads}: The MLP observes all 64 input bytes. Real HTTPS traffic has TLS-encrypted payloads that are indistinguishable from random noise, matching the \textsc{OTHER} class distribution in synthetic training data.
 
-  \item \textbf{Header-only signal}: The discriminative features (protocol byte at offset 23, destination port at offsets 36--37) occupy only 3 of 64 bytes (4.7\% of the input). The model's 32-neuron hidden layer may not have learned to ignore the irrelevant encrypted payload bytes.
+  \item \textbf{Header-only signal}: The discriminative features (protocol byte at offset 23, destination port at offsets 36--37) occupy only 3 of 64 bytes (4.7\% of the input). The model's 32-neuron hidden layer had not learned to ignore the irrelevant encrypted payload bytes.
 
-  \item \textbf{High precision despite low recall}: The model learned a \emph{conservative} decision boundary --- it only predicts HTTP when it is confident, never producing false positives. This is desirable for a routing classifier where misrouting a non-HTTP packet could be a security concern.
+  \item \textbf{High precision despite low recall}: The model learned a \emph{conservative} decision boundary---it only predicts HTTP when confident, avoiding false positives.
 \end{enumerate}
 
-\noindent This result validates the end-to-end pipeline while identifying a clear improvement path: retraining the model on captured real traffic, or restricting the tensor encoding to header-only bytes ($\phi_H: \vect{p}[0{:}54] \to \R^{54}$), would close the recall gap without architectural changes.
+\subsection{Hybrid Retraining with Captured Traffic}
+\label{sec:retrain}
+
+To close the domain gap, we introduce a \texttt{HybridDataset} that combines synthetic and real packets:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Real traffic capture}: $3{,}000$ packets captured from the host's Wi-Fi interface via Npcap under normal browsing activity ($2{,}824$ HTTP, $28$ DNS, $148$ OTHER).
+  \item \textbf{Header-based labeling}: A \texttt{label\_raw\_packet()} function assigns ground truth from protocol and port bytes, applying the same rules as the synthetic generators.
+  \item \textbf{Oversampling}: Real packets are replicated $10\times$ to balance against the synthetic majority ($150{,}000$ synthetic vs.\ $35{,}000$ real = $185{,}000$ total).
+  \item \textbf{Retraining}: 30 epochs, same architecture ($3{,}235$ parameters), Adam with $\eta = 10^{-3}$.
+\end{enumerate}
+
+\noindent The hybrid training exposes the model to real TLS-encrypted payload distributions paired with correct labels, teaching it to rely on header bytes for classification.
+
+\subsection{Results After Retraining}
+
+Table~\ref{tab:confusion-after} shows the confusion matrix after hybrid retraining on the same 500 live packets.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{l|rrr}
+\toprule
+\textbf{Ground Truth $\downarrow$ / NPU $\to$} & \textbf{TCP\_HTTP} & \textbf{UDP\_DNS} & \textbf{OTHER} \\
+\midrule
+TCP\_HTTP & \textbf{481} & 0 & 0 \\
+UDP\_DNS  & 0   & \textbf{0} & 0 \\
+OTHER     & 0   & 0   & \textbf{19} \\
+\bottomrule
+\end{tabular}
+\caption{Confusion matrix \emph{after} hybrid retraining on 500 live packets. Agreement: 100\%. Zero misclassifications.}
+\label{tab:confusion-after}
+\end{table}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lrr}
+\toprule
+\textbf{Metric} & \textbf{Before (synthetic)} & \textbf{After (hybrid)} \\
+\midrule
+Validation accuracy   & 99.03\% & \textbf{99.71\%} \\
+Real traffic agreement & 47.8\% & \textbf{100.0\%} \\
+HTTP precision         & 99.1\% & \textbf{100.0\%} \\
+HTTP recall            & 46.2\% & \textbf{100.0\%} \\
+Misclassifications     & 261    & \textbf{0} \\
+\bottomrule
+\end{tabular}
+\caption{Before vs.\ after hybrid retraining on 500 real captured packets. The domain gap is completely eliminated without architectural changes.}
+\label{tab:retrain-comparison}
+\end{table}
+
+\noindent Additionally, a live validation on $5{,}000$ fresh packets (not used in training) confirms the retrained model classifies $94.4\%$ as \textsc{TCP\_HTTP}, $0.1\%$ as \textsc{UDP\_DNS}, and $5.5\%$ as \textsc{OTHER} at $\mathbf{10{,}041}$~\textbf{pkt/s} sustained throughput---consistent with the expected traffic mix of an active browsing session. Two invariants hold across all tests: \textbf{determinism} (identical inputs always produce identical outputs) and \textbf{validity} (every class~ID $\in \{0, 1, 2\}$).
+
+\begin{remark}[Retraining without recompilation]
+The hybrid retraining changes only the ONNX model weights. The C++ runtime, dataflow graph, GPNPU pipeline, and Npcap integration remain unchanged---the same binary loads the retrained model and immediately achieves 100\% agreement. This validates the architectural principle that the \emph{graph is the program}: classification behavior is defined by tensor weights, not by code.
+\end{remark}
 
 
 % ═══════════════════════════════════════════════════════════════════
@@ -1558,10 +1608,10 @@ The central thesis---\emph{todo es el grafo}---is validated through four results
 
   \item \textbf{GPNPU Hybrid Architecture} (Section~\ref{sec:gpnpu}): A diamond-DAG splits traffic into CPU fast-path (${\sim}0.38\,\mu\text{s}$/pkt) and NPU hard-path (triple-buffered async), achieving $4.3\times$ speedup at 80\% fast-path ratio (Corollary~\ref{cor:effective-throughput}). Per-packet latency instrumentation (p50/p95/p99) confirms the bimodal distribution: fast-path p95 $\ll$ hard-path p95.
 
-  \item \textbf{Live Traffic Validation} (Section~\ref{sec:live-eval}): End-to-end Npcap capture on 10{,}000 live Wi-Fi packets achieves 9{,}702\,pkt/s sustained throughput. The NPU classifier exhibits 99.1\% HTTP precision on real traffic, with a recall gap attributable to the synthetic--real domain shift on TLS-encrypted payloads---an improvement addressable by retraining on captured data without architectural changes.
+  \item \textbf{Live Traffic Validation and Hybrid Retraining} (Section~\ref{sec:live-eval}): End-to-end Npcap capture on live Wi-Fi traffic reveals a synthetic-to-real domain gap (47.8\% agreement) caused by TLS-encrypted payloads. Hybrid retraining on $3{,}000$ captured packets closes the gap completely: $\mathbf{100\%}$ agreement on 500 real packets (Table~\ref{tab:retrain-comparison}), $10{,}041$\,pkt/s sustained throughput on $5{,}000$ fresh packets---with zero code changes, only new ONNX weights.
 \end{enumerate}
 
-\noindent The CPU handles deterministic rule evaluation, the NPU handles learned classification, and the dataflow graph orchestrates both in a formally verified pipeline. The live traffic evaluation confirms the system operates correctly on real network data. The architecture is ready for DPDK kernel-bypass capture and domain-adapted retraining to close the remaining gaps to line-rate processing on commodity NPU hardware.
+\noindent The CPU handles deterministic rule evaluation, the NPU handles learned classification, and the dataflow graph orchestrates both in a formally verified pipeline. The retraining result validates the central design principle: classification behavior is defined by tensor weights, not by code. Updating the model requires only re-exporting the ONNX file---the entire C++ runtime, dataflow graph, and GPNPU pipeline remain unchanged. The architecture is ready for DPDK kernel-bypass capture to close the remaining gap to line-rate processing on commodity NPU hardware.
 
 \appendix
 
