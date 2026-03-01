@@ -13,7 +13,15 @@ protected:
             GTEST_SKIP() << "Test pcap not found: " << pcap_path_;
         }
     }
-    std::string pcap_path_ = "../../tests/fixtures/test.pcap";
+    std::string pcap_path_ = []() -> std::string {
+        for (auto& p : {"tests/fixtures/test.pcap",
+                        "../tests/fixtures/test.pcap",
+                        "../../tests/fixtures/test.pcap",
+                        "../../../tests/fixtures/test.pcap"}) {
+            if (std::filesystem::exists(p)) return p;
+        }
+        return "tests/fixtures/test.pcap";
+    }();
 };
 
 TEST_F(PcapSourceTest, ReadsPackets) {

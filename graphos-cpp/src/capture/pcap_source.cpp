@@ -2,8 +2,40 @@
 #include <pcap/pcap.h>
 #include <atomic>
 #include <stdexcept>
+#include <string>
 
 namespace graphos {
+
+// ── resolve_iface_name — map friendly name (e.g. "Wi-Fi") to NPF device ──
+static std::string resolve_iface_name(const std::string& name) {
+    // Already an NPF device path — return as-is
+    if (name.find("\\Device\\") != std::string::npos ||
+        name.find("npf") != std::string::npos) {
+        return name;
+    }
+
+    // Enumerate pcap devices and match by description
+    pcap_if_t* alldevs = nullptr;
+    char errbuf[PCAP_ERRBUF_SIZE];
+    if (pcap_findalldevs(&alldevs, errbuf) == -1 || !alldevs)
+        return name; // fallback to original
+
+    std::string result = name;
+    for (pcap_if_t* d = alldevs; d; d = d->next) {
+        std::string dev_name = d->name ? d->name : "";
+        std::string dev_desc = d->description ? d->description : "";
+
+        // Match by description containing the friendly name, or device name containing it
+        if ((!dev_desc.empty() && dev_desc.find(name) != std::string::npos) ||
+            (!dev_name.empty() && dev_name.find(name) != std::string::npos)) {
+            result = dev_name;
+            break;
+        }
+    }
+
+    pcap_freealldevs(alldevs);
+    return result;
+}
 
 // ── PcapSource (offline) ──
 
@@ -58,7 +90,8 @@ struct LiveCaptureSource::Impl {
 
     Impl(const std::string& iface, const std::string& bpf_filter) {
         char errbuf[PCAP_ERRBUF_SIZE];
-        handle = pcap_open_live(iface.c_str(), TENSOR_DIM, 0, 100, errbuf);
+        std::string resolved = resolve_iface_name(iface);
+        handle = pcap_open_live(resolved.c_str(), TENSOR_DIM, 0, 100, errbuf);
         if (!handle)
             throw std::runtime_error("pcap_open_live failed: " +
                                      std::string(errbuf));
@@ -108,6 +141,25 @@ std::optional<OwnedPacket> LiveCaptureSource::next() {
 void LiveCaptureSource::stop() {
     impl_->stopped.store(true, std::memory_order_release);
     if (impl_->handle) pcap_breakloop(impl_->handle);
+}
+
+// ── list_capture_devices ──
+
+std::vector<CaptureDevice> list_capture_devices() {
+    std::vector<CaptureDevice> result;
+    pcap_if_t* alldevs = nullptr;
+    char errbuf[PCAP_ERRBUF_SIZE];
+    if (pcap_findalldevs(&alldevs, errbuf) == -1 || !alldevs)
+        return result;
+
+    for (pcap_if_t* d = alldevs; d; d = d->next) {
+        result.push_back({
+            d->name ? d->name : "",
+            d->description ? d->description : ""
+        });
+    }
+    pcap_freealldevs(alldevs);
+    return result;
 }
 
 } // namespace graphos

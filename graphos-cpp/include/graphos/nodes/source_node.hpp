@@ -58,4 +58,20 @@ public:
     void stop() {}
 };
 
+// ── OwnedPacket vector source — wraps a vector<OwnedPacket> (copies on next()) ──
+class OwnedPacketVectorSource {
+    const std::vector<OwnedPacket>& pkts_;
+    size_t idx_ = 0;
+public:
+    explicit OwnedPacketVectorSource(const std::vector<OwnedPacket>& pkts)
+        : pkts_(pkts) {}
+
+    std::optional<OwnedPacket> next() {
+        if (idx_ >= pkts_.size()) return std::nullopt;
+        return pkts_[idx_++];
+    }
+
+    void stop() { idx_ = pkts_.size(); }
+};
+
 } // namespace graphos

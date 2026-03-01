@@ -26,12 +26,14 @@ find_package(OpenVINO REQUIRED COMPONENTS Runtime)
 option(GRAPHOS_ENABLE_PCAP "Enable pcap capture sources" ON)
 if(GRAPHOS_ENABLE_PCAP)
     if(WIN32)
-        # Npcap SDK — user sets NPCAP_SDK_DIR
+        # Npcap SDK — user sets NPCAP_SDK_DIR or defaults to C:/npcap-sdk
         if(DEFINED ENV{NPCAP_SDK_DIR})
             set(NPCAP_SDK_DIR "$ENV{NPCAP_SDK_DIR}")
-        elseif(NOT NPCAP_SDK_DIR)
+        endif()
+        if(NOT NPCAP_SDK_DIR)
             set(NPCAP_SDK_DIR "C:/npcap-sdk")
         endif()
+        message(STATUS "Looking for Npcap SDK in: ${NPCAP_SDK_DIR}")
         if(EXISTS "${NPCAP_SDK_DIR}/Include")
             set(PCAP_INCLUDE_DIRS "${NPCAP_SDK_DIR}/Include")
             if(CMAKE_SIZEOF_VOID_P EQUAL 8)
@@ -40,6 +42,9 @@ if(GRAPHOS_ENABLE_PCAP)
                 set(PCAP_LIBRARIES "${NPCAP_SDK_DIR}/Lib/wpcap.lib")
             endif()
             set(PCAP_FOUND TRUE)
+            message(STATUS "Npcap SDK found: ${PCAP_INCLUDE_DIRS}")
+        else()
+            message(STATUS "Npcap SDK not found at ${NPCAP_SDK_DIR}/Include")
         endif()
     else()
         find_package(PkgConfig QUIET)
@@ -91,6 +96,12 @@ set(LIB_SOURCES
     src/actions/counter.cpp
     src/actions/log_action.cpp
     src/shell/repl.cpp
+    src/nodes/fast_path_classifier.cpp
+    src/nodes/hard_batcher.cpp
+    src/nodes/npu_executor_async.cpp
+    src/nodes/decision_joiner.cpp
+    src/nodes/action_dispatcher.cpp
+    src/gpnpu/pipeline.cpp
 )
 
 if(PCAP_FOUND)
@@ -159,6 +170,13 @@ if(GRAPHOS_BUILD_TESTS)
         tests/test_program.cpp
         tests/test_runtime.cpp
         tests/test_repl.cpp
+        tests/test_fast_path.cpp
+        tests/test_hard_batcher.cpp
+        tests/test_npu_executor_async.cpp
+        tests/test_decision_joiner.cpp
+        tests/test_action_dispatcher.cpp
+        tests/test_gpnpu_pipeline.cpp
+        tests/test_latency_histogram.cpp
     )
 
     if(PCAP_FOUND)

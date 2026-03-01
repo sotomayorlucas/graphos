@@ -2,6 +2,7 @@
 #include "graphos/capture/source.hpp"
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace graphos {
 
@@ -37,5 +38,12 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+
+// ── list_capture_devices — enumerate available capture interfaces ──
+struct CaptureDevice {
+    std::string name;
+    std::string description;
+};
+std::vector<CaptureDevice> list_capture_devices();
 
 } // namespace graphos
