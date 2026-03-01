@@ -20,6 +20,9 @@ public:
         : Node(std::move(name)), source_(std::move(source)) {}
 
     void process(std::stop_token st) override {
+        // stop_callback calls source_.stop() when scheduler requests stop,
+        // breaking streaming sources' infinite poll loops (e.g. DpdkSource).
+        std::stop_callback on_stop(st, [this]{ source_.stop(); });
         while (!st.stop_requested()) {
             auto pkt = source_.next();
             if (!pkt.has_value()) break;

@@ -184,6 +184,10 @@ if(GRAPHOS_BUILD_TESTS)
         list(APPEND TEST_SOURCES tests/test_real_capture.cpp)
     endif()
 
+    if(GRAPHOS_ENABLE_DPDK)
+        list(APPEND TEST_SOURCES tests/test_dpdk_capture.cpp)
+    endif()
+
     add_executable(graphos_tests ${TEST_SOURCES})
     target_link_libraries(graphos_tests PRIVATE graphos_lib GTest::gtest_main)
 

@@ -16,6 +16,10 @@ public:
     DpdkSource(uint16_t port_id, uint16_t burst_size = 32);
     ~DpdkSource() override;
 
+    // Movable (implicit move suppressed by user-declared destructor)
+    DpdkSource(DpdkSource&&) noexcept = default;
+    DpdkSource& operator=(DpdkSource&&) noexcept = default;
+
     std::optional<OwnedPacket> next() override;
     void stop() override;
 

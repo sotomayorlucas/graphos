@@ -58,6 +58,11 @@ ctest --output-on-failure              # Run tests
 ./graphos shell --model-dir ../../models                   # REPL
 ./graphos bench --model-dir ../../models --n-packets 10000 # Benchmark
 ./graphos_bench                        # Microbenchmarks (channel, tensor, argmax)
+
+# DPDK kernel-bypass (Linux only, -DGRAPHOS_ENABLE_DPDK=ON)
+./graphos dpdk --port 0 --model-dir ../../models          # Capture + classify on DPDK port 0
+./graphos dpdk --port 0 --burst-size 64 --log             # Custom burst size + logging
+./graphos dpdk --port 0 -- -l 0-3 -n 4                    # Forward EAL args after --
 ```
 
 ## C++ Architecture (graphos-cpp/)

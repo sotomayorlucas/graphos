@@ -10,6 +10,9 @@
 #ifdef GRAPHOS_HAS_PCAP
 #include "graphos/capture/pcap_source.hpp"
 #endif
+#ifdef GRAPHOS_ENABLE_DPDK
+#include "graphos/capture/dpdk_source.hpp"
+#endif
 #include <cstring>
 #include <iostream>
 #include <iomanip>
@@ -33,6 +36,9 @@ void print_usage() {
         "  pcap      Classify packets from .pcap file or live capture\n"
         "  ifaces    List available capture interfaces\n"
 #endif
+#ifdef GRAPHOS_ENABLE_DPDK
+        "  dpdk      DPDK kernel-bypass capture + classification (Linux)\n"
+#endif
         "\nOptions:\n"
         "  --model-dir <dir>    Model directory (default: models/)\n"
         "  --batch-size <n>     Batch size (default: 64)\n"
@@ -51,7 +57,9 @@ void print_usage() {
 #endif
 #ifdef GRAPHOS_ENABLE_DPDK
         "  --dpdk               Use DPDK capture source\n"
-        "  --port <n>           DPDK port ID\n"
+        "  --port <n>           DPDK port ID (default: 0)\n"
+        "  --burst-size <n>     DPDK rx_burst size (default: 32)\n"
+        "  --  <eal-args>       Forward remaining args to DPDK EAL init\n"
 #endif
         ;
 }
@@ -64,6 +72,8 @@ struct Options {
     size_t n_packets = 1000;
     bool dpdk = false;
     uint16_t dpdk_port = 0;
+    uint16_t dpdk_burst_size = 32;
+    std::vector<std::string> eal_args;
     // pcap options
     std::string pcap_file;
     std::string iface;
@@ -114,6 +124,14 @@ Options parse_args(int argc, char** argv) {
             opts.dpdk = true;
         else if (arg == "--port" && i + 1 < argc)
             opts.dpdk_port = static_cast<uint16_t>(std::stoi(argv[++i]));
+        else if (arg == "--burst-size" && i + 1 < argc)
+            opts.dpdk_burst_size = static_cast<uint16_t>(std::stoi(argv[++i]));
+        else if (arg == "--") {
+            // Everything after "--" is forwarded to DPDK EAL
+            for (int j = i + 1; j < argc; ++j)
+                opts.eal_args.emplace_back(argv[j]);
+            break;
+        }
     }
     return opts;
 }
@@ -406,6 +424,141 @@ void run_gpnpu(const Options& opts) {
     Scheduler::print_metrics(metrics, wall);
 }
 
+#ifdef GRAPHOS_ENABLE_DPDK
+// Global scheduler pointer for Ctrl+C handler in DPDK mode
+graphos::Scheduler* g_dpdk_scheduler = nullptr;
+
+void run_dpdk(const Options& opts) {
+    using namespace graphos;
+
+    std::cout << "=== GraphOS DPDK Kernel-Bypass Capture ===\n"
+              << "Port: " << opts.dpdk_port << '\n'
+              << "Burst size: " << opts.dpdk_burst_size << '\n'
+              << "Device: " << opts.device << '\n'
+              << "Batch size: " << opts.batch_size << "\n\n";
+
+    // Init EAL — build argc/argv from eal_args
+    std::vector<const char*> eal_argv;
+    eal_argv.push_back("graphos"); // program name
+    for (auto& a : opts.eal_args)
+        eal_argv.push_back(a.c_str());
+
+    std::cout << "Initializing DPDK EAL";
+    if (!opts.eal_args.empty()) {
+        std::cout << " with args:";
+        for (auto& a : opts.eal_args)
+            std::cout << " " << a;
+    }
+    std::cout << "\n";
+
+    DpdkSource::init_eal(
+        static_cast<int>(eal_argv.size()),
+        const_cast<char**>(eal_argv.data()));
+    std::cout << "EAL initialized.\n";
+
+    // Build GPNPU pipeline with DpdkSource
+    GpnpuConfig config;
+    config.onnx_path = opts.model_dir + "/router_graph_b64.onnx";
+    config.device = opts.device;
+    config.batch_size = opts.batch_size;
+    config.min_fill = opts.min_fill;
+    config.deadline = std::chrono::microseconds(opts.deadline_us);
+    config.num_inflight = opts.inflight;
+    config.ordered = opts.ordered;
+
+    auto counter = std::make_shared<CountAction>();
+    std::shared_ptr<LogAction> logger;
+
+    std::unordered_map<int, std::vector<std::shared_ptr<Action>>> class_actions;
+    class_actions[CLASS_HTTP] = {counter};
+    class_actions[CLASS_DNS] = {counter};
+    class_actions[CLASS_OTHER] = {counter};
+
+    if (opts.log_packets) {
+        logger = std::make_shared<LogAction>(true);
+        class_actions[CLASS_HTTP].push_back(logger);
+        class_actions[CLASS_DNS].push_back(logger);
+        class_actions[CLASS_OTHER].push_back(logger);
+    }
+
+    // DpdkSource is a streaming source — SourceNode's stop_callback will
+    // call DpdkSource::stop() to break the poll loop on shutdown.
+    auto source = std::make_shared<SourceNode<DpdkSource>>(
+        "dpdk_source", DpdkSource(opts.dpdk_port, opts.dpdk_burst_size));
+
+    auto pipeline = build_gpnpu_pipeline(
+        source, config, std::move(class_actions));
+
+    // Ctrl+C handler → scheduler.stop()
+    Scheduler scheduler(pipeline.graph);
+    g_dpdk_scheduler = &scheduler;
+    auto prev_handler = std::signal(SIGINT, [](int) {
+        std::cout << "\nStopping capture...\n";
+        if (g_dpdk_scheduler)
+            g_dpdk_scheduler->stop();
+    });
+
+    std::cout << "Capturing on DPDK port " << opts.dpdk_port
+              << ". Press Ctrl+C to stop.\n\n";
+    auto metrics = scheduler.run();
+
+    // Restore signal handler
+    std::signal(SIGINT, prev_handler);
+    g_dpdk_scheduler = nullptr;
+
+    if (logger) logger->close();
+
+    // Report
+    double wall = scheduler.wall_time();
+    uint64_t fast = pipeline.classifier->fast_count();
+    uint64_t hard = pipeline.classifier->hard_count();
+    uint64_t total = fast + hard;
+
+    std::cout << "\n--- DPDK Classification Results ---\n"
+              << "Total packets:  " << total << '\n'
+              << "Fast path:      " << fast << " ("
+              << std::fixed << std::setprecision(1)
+              << (total > 0 ? 100.0 * fast / total : 0.0) << "%)\n"
+              << "Hard path:      " << hard << " ("
+              << std::fixed << std::setprecision(1)
+              << (total > 0 ? 100.0 * hard / total : 0.0) << "%)\n\n";
+
+    std::cout << "Per-class breakdown:\n";
+    auto summary = counter->summary();
+    for (auto& [cid, cnt] : summary) {
+        auto it = CLASS_NAMES.find(cid);
+        std::string name = it != CLASS_NAMES.end() ? it->second : "class_" + std::to_string(cid);
+        std::cout << "  " << std::setw(10) << std::left << name
+                  << ": " << cnt << " ("
+                  << std::fixed << std::setprecision(1)
+                  << (total > 0 ? 100.0 * cnt / total : 0.0) << "%)\n";
+    }
+
+    std::cout << "\n--- Performance ---\n"
+              << "Wall time:   " << std::fixed << std::setprecision(4) << wall << " s\n"
+              << "Throughput:  " << std::fixed << std::setprecision(0)
+              << (wall > 0 ? static_cast<double>(total) / wall : 0.0) << " pkt/s\n";
+
+    auto print_latency = [](const char* label, const LatencyHistogram& h) {
+        if (h.count() == 0) return;
+        std::cout << label
+                  << "p50=" << std::fixed << std::setprecision(1) << h.p50()
+                  << "  p95=" << h.p95()
+                  << "  p99=" << h.p99()
+                  << "  mean=" << h.mean() << " us"
+                  << "  (n=" << h.count() << ")\n";
+    };
+
+    std::cout << "\n--- Latency ---\n";
+    print_latency("Overall: ", pipeline.dispatcher->overall_latency());
+    print_latency("Fast:    ", pipeline.dispatcher->fast_latency());
+    print_latency("Hard:    ", pipeline.dispatcher->hard_latency());
+
+    std::cout << '\n';
+    Scheduler::print_metrics(metrics, wall);
+}
+#endif // GRAPHOS_ENABLE_DPDK
+
 #ifdef GRAPHOS_HAS_PCAP
 // Global flag for Ctrl+C in live capture
 std::atomic<bool> g_stop_capture{false};
@@ -589,6 +742,9 @@ int main(int argc, char** argv) {
         else if (opts.command == "shell") run_shell(opts);
         else if (opts.command == "bench") run_bench(opts);
         else if (opts.command == "gpnpu") run_gpnpu(opts);
+#ifdef GRAPHOS_ENABLE_DPDK
+        else if (opts.command == "dpdk") run_dpdk(opts);
+#endif
 #ifdef GRAPHOS_HAS_PCAP
         else if (opts.command == "pcap") run_pcap(opts);
         else if (opts.command == "ifaces") {
